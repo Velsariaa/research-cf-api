@@ -35,19 +35,39 @@ model = joblib.load('model.pkl')
 # ============================================================
 def resolve_student_id(arg):
     raw = (arg or "").strip()
-    if raw.isdigit():
-        return int(raw)
 
     conn = get_conn()
     try:
+        # 1) Kung mukhang numeric, subukan muna as student_id mismo
+        if raw.isdigit():
+            sid = int(raw)
+            df = pd.read_sql(
+                "SELECT student_id FROM student_information WHERE student_id = %s LIMIT 1",
+                conn,
+                params=[sid],
+            )
+            if not df.empty:
+                return sid  # valid student_id na
+
+        # 2) Kung hindi nag-match as student_id, hanapin as student_number
         df = pd.read_sql(
-            "SELECT student_id FROM student_information WHERE student_number = %s LIMIT 1",
+            "SELECT student_id FROM student_information WHERE student_number = %s",
             conn,
-            params=[raw]
+            params=[raw],
         )
-        if not df.empty:
-            return int(df.iloc[0]["student_id"])
-        return None
+
+        if df.empty:
+            return None
+
+        # 3) Linisin kung may header / maling data (e.g. 'student_id')
+        df["student_id"] = pd.to_numeric(df["student_id"], errors="coerce")
+        df = df.dropna(subset=["student_id"])
+
+        if df.empty:
+            # lahat ng nakuha ay hindi valid na number (hal. 'student_id')
+            return None
+
+        return int(df.iloc[0]["student_id"])
     finally:
         conn.close()
 
@@ -309,3 +329,4 @@ if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
 
     app.run(host="0.0.0.0", port=8000, debug=True)
+
