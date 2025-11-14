@@ -10,12 +10,12 @@ import joblib
 app = Flask(__name__)
 
 # ----------------------------
-# MySQL connection config (EDIT THIS)
+# MySQL connection config
 # ----------------------------
 db_config = {
-    'host': 'srv2051.hstgr.io',            # change to your DB host if needed
-    'user': 'u311577524_admin',            # change to your DB user
-    'password': 'Ej@0MZ#*9',               # change to your DB password
+    'host': 'srv2051.hstgr.io',
+    'user': 'u311577524_admin',
+    'password': 'Ej@0MZ#*9',
     'database': 'u311577524_research_db',
     'cursorclass': pymysql.cursors.DictCursor
 }
@@ -26,12 +26,13 @@ def get_conn():
 # ----------------------------
 # Load vectorizer / model for /search
 # ----------------------------
+# NOTE: kung ito ang nagka-cause ng error dahil wala pang pkl files,
+# pwede mo muna i-comment out itong dalawang lines:
 vectorizer = joblib.load('vectorizer.pkl')
-# If you don't actually use model, you can delete this line
-model = joblib.load('model.pkl')
+model = joblib.load('model.pkl')  # optional lang, not used directly
 
 # ============================================================
-#  CF PART (from recommend_cf.py) → /recommend endpoint
+#  COLLABORATIVE FILTERING HELPERS
 # ============================================================
 
 def resolve_student_id(arg):
@@ -56,7 +57,6 @@ def resolve_student_id(arg):
             try:
                 return int(df.iloc[0]["student_id"])
             except (ValueError, TypeError):
-                # kung may weird na value sa DB (e.g. string "student_id"), wag mag-crash
                 return None
         return None
     finally:
@@ -70,7 +70,7 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
         frames = []
         remaining = limit
 
-        # Fallback 1: most read with same program & college (Approved only)
+        # Fallback 1: most read within same program & college (Approved only)
         if program_id and college_id and remaining > 0:
             q1 = f"""
                 SELECT tc.tc_id,
@@ -100,7 +100,6 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
             """
-
             params = [program_id, college_id] + (exclude_ids if exclude_ids else []) + [remaining]
             df1 = pd.read_sql(q1, conn, params=params)
             frames.append(df1)
@@ -143,7 +142,6 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
             """
-
             params2 = (ex_ids if ex_ids else []) + [remaining]
             df2 = pd.read_sql(q2, conn, params=params2)
             frames.append(df2)
@@ -171,30 +169,15 @@ def compute_recommendations(student_arg):
             conn,
             params=[student_id]
         )
+        program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
+        college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
 
-        # ---- SAFE PARSING NG program_id at college_id ----
-        program_id = None
-        college_id = None
-        if not prog_col_df.empty:
-            row = prog_col_df.iloc[0]
-
-            raw_program = row.get("program_id")
-            try:
-                program_id = int(raw_program)
-            except (ValueError, TypeError):
-                program_id = None
-
-            raw_college = row.get("colleges_id")
-            try:
-                college_id = int(raw_college)
-            except (ValueError, TypeError):
-                college_id = None
-        # -----------------------------------------------
-
+        # No reads at all → fallback
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
+        # User-item matrix
         user_item = reads_df.pivot_table(
             index="student_id",
             columns="tc_id",
@@ -202,16 +185,18 @@ def compute_recommendations(student_arg):
             fill_value=0
         )
 
+        # If this user has no reads in matrix → fallback
         if student_id not in user_item.index:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
+        # Cosine similarity across users
         sim = cosine_similarity(user_item)
         sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
         similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
-
         current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
+
         recommend_df = pd.DataFrame()
         candidate_ids = []
 
@@ -256,6 +241,7 @@ def compute_recommendations(student_arg):
                 recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])
                 recommend_df = recommend_df.head(4)
 
+        # Fill up with fallback if kulang pa sa 4
         if len(recommend_df) < 4:
             remaining = 4 - len(recommend_df)
             exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
@@ -272,6 +258,9 @@ def compute_recommendations(student_arg):
     finally:
         conn.close()
 
+# ============================================================
+#  ROUTES
+# ============================================================
 
 @app.route("/recommend")
 def recommend():
@@ -282,10 +271,40 @@ def recommend():
     return jsonify(recs)
 
 
-# ============================================================
-#  SEARCH PART → /search endpoint
-# ============================================================
-@app.route('/search', methods=['POST'])
+@app.route("/db-test")
+def db_test():
+    """
+    Simple DB connectivity + row count check
+    """
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS student_information_rows FROM student_information")
+                info = cursor.fetchone()
+
+                cursor.execute("SELECT COUNT(*) AS thesis_capstone_rows FROM thesis_capstone")
+                thesis = cursor.fetchone()
+
+                cursor.execute("SELECT COUNT(*) AS student_reads_rows FROM student_reads")
+                reads = cursor.fetchone()
+
+            return jsonify({
+                "ok": True,
+                "student_information_rows": info["student_information_rows"],
+                "thesis_capstone_rows": thesis["thesis_capstone_rows"],
+                "student_reads_rows": reads["student_reads_rows"]
+            })
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/search", methods=['POST'])
 def search():
     data = request.get_json(silent=True) or {}
     query = data.get('query', '').strip()
@@ -324,34 +343,8 @@ def search():
     return jsonify(top[['title', 'college', 'program']].to_dict(orient='records'))
 
 
-@app.route("/db-test")
-def db_test():
-    try:
-        conn = get_conn()
-        try:
-            df_info = pd.read_sql("SELECT COUNT(*) AS cnt FROM student_information", conn)
-            df_thesis = pd.read_sql("SELECT COUNT(*) AS cnt FROM thesis_capstone", conn)
-            df_reads = pd.read_sql("SELECT COUNT(*) AS cnt FROM student_reads", conn)
-
-            return jsonify({
-                "ok": True,
-                "student_information_rows": int(df_info.iloc[0]["cnt"]),
-                "thesis_capstone_rows": int(df_thesis.iloc[0]["cnt"]),
-                "student_reads_rows": int(df_reads.iloc[0]["cnt"])
-            })
-        finally:
-            conn.close()
-    except Exception as e:
-        # Kung may problema sa koneksyon / query, ipakita natin yung error
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
-
-
 # ============================================================
 #  ENTRYPOINT
 # ============================================================
 if __name__ == '__main__':
-    # When deploying on a platform, you might not want debug=True
     app.run(host="0.0.0.0", port=8000, debug=True)
