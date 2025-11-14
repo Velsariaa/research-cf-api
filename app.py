@@ -171,8 +171,25 @@ def compute_recommendations(student_arg):
             conn,
             params=[student_id]
         )
-        program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
-        college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
+
+        # ---- SAFE PARSING NG program_id at college_id ----
+        program_id = None
+        college_id = None
+        if not prog_col_df.empty:
+            row = prog_col_df.iloc[0]
+
+            raw_program = row.get("program_id")
+            try:
+                program_id = int(raw_program)
+            except (ValueError, TypeError):
+                program_id = None
+
+            raw_college = row.get("colleges_id")
+            try:
+                college_id = int(raw_college)
+            except (ValueError, TypeError):
+                college_id = None
+        # -----------------------------------------------
 
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
