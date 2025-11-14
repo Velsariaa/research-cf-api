@@ -221,8 +221,15 @@ def recommend():
     student_arg = request.args.get("student_id", "").strip()
     if not student_arg:
         return jsonify([])
+
     recs = compute_recommendations(student_arg)
+
+    # DEBUG: log to console / Render logs
+    print("=== RECS DEBUG ===")
+    print(recs)
+
     return jsonify(recs)
+
 
 # ============================================================
 #  SEARCH PART → /search endpoint
@@ -306,5 +313,6 @@ def db_test():
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
 
