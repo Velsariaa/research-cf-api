@@ -36,9 +36,15 @@ model = joblib.load('model.pkl')
 
 def resolve_student_id(arg):
     raw = (arg or "").strip()
-    if raw.isdigit():
-        return int(raw)
 
+    # Case 1: numeric student_id (e.g. 15)
+    if raw.isdigit():
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    # Case 2: treat as student_number (e.g. "22-00677")
     conn = get_conn()
     try:
         df = pd.read_sql(
@@ -47,10 +53,15 @@ def resolve_student_id(arg):
             params=[raw]
         )
         if not df.empty:
-            return int(df.iloc[0]["student_id"])
+            try:
+                return int(df.iloc[0]["student_id"])
+            except (ValueError, TypeError):
+                # kung may weird na value sa DB (e.g. "student_id"), wag mag-crash
+                return None
         return None
     finally:
         conn.close()
+
 
 def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
     exclude_ids = exclude_ids or []
@@ -62,17 +73,34 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
         # Fallback 1: most read with same program & college (Approved only)
         if program_id and college_id and remaining > 0:
             q1 = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
-                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
+                SELECT tc.tc_id,
+                    tc.title,
+                    tc.authorone, tc.authortwo, tc.authorthree,
+                    tc.authorfour, tc.authorfive,
+                    tc.colleges_id, tc.program_id,
+                    tc.academic_year, tc.project_type,
+                    tc.views,
+                    p.program,
+                    c.colleges AS college,
+                    ts.status,
+                    COUNT(sr.read_id) AS read_count
                 FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
-                WHERE tc.program_id = %s AND tc.colleges_id = %s
+                INNER JOIN thesis_submission ts
+                    ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr
+                    ON sr.tc_id = tc.tc_id
+                LEFT JOIN program p
+                    ON tc.program_id = p.program_id
+                LEFT JOIN colleges c
+                    ON tc.colleges_id = c.colleges_id
+                WHERE tc.program_id = %s
+                AND tc.colleges_id = %s
                 {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
                 GROUP BY tc.tc_id
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
             """
+
             params = [program_id, college_id] + (exclude_ids if exclude_ids else []) + [remaining]
             df1 = pd.read_sql(q1, conn, params=params)
             frames.append(df1)
@@ -89,17 +117,32 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
             if ex_ids:
                 where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
 
-            q2 = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
-                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
-                FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
-                {where_clause}
-                GROUP BY tc.tc_id
-                ORDER BY read_count DESC, tc.tc_id DESC
-                LIMIT %s
-            """
+           q2 = f"""
+    SELECT tc.tc_id,
+           tc.title,
+           tc.authorone, tc.authortwo, tc.authorthree,
+           tc.authorfour, tc.authorfive,
+           tc.colleges_id, tc.program_id,
+           tc.academic_year, tc.project_type,
+           tc.views,
+           p.program,
+           c.colleges AS college,
+           ts.status,
+           COUNT(sr.read_id) AS read_count
+    FROM thesis_capstone tc
+    INNER JOIN thesis_submission ts
+        ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+    LEFT JOIN student_reads sr
+        ON sr.tc_id = tc.tc_id
+    LEFT JOIN program p
+        ON tc.program_id = p.program_id
+    LEFT JOIN colleges c
+        ON tc.colleges_id = c.colleges_id
+    {where_clause}
+    GROUP BY tc.tc_id
+    ORDER BY read_count DESC, tc.tc_id DESC
+    LIMIT %s
+"""
             params2 = (ex_ids if ex_ids else []) + [remaining]
             df2 = pd.read_sql(q2, conn, params=params2)
             frames.append(df2)
@@ -168,12 +211,25 @@ def compute_recommendations(student_arg):
         if candidate_ids:
             placeholders = ",".join(["%s"] * len(candidate_ids))
             recommend_query = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo,
-                       tc.colleges_id, tc.program_id, tc.academic_year, tc.project_type
-                FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                WHERE tc.tc_id IN ({placeholders})
-            """
+    SELECT tc.tc_id,
+           tc.title,
+           tc.authorone, tc.authortwo, tc.authorthree,
+           tc.authorfour, tc.authorfive,
+           tc.colleges_id, tc.program_id,
+           tc.academic_year, tc.project_type,
+           tc.views,
+           p.program,
+           c.colleges AS college,
+           ts.status
+    FROM thesis_capstone tc
+    INNER JOIN thesis_submission ts
+        ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+    LEFT JOIN program p
+        ON tc.program_id = p.program_id
+    LEFT JOIN colleges c
+        ON tc.colleges_id = c.colleges_id
+    WHERE tc.tc_id IN ({placeholders})
+"""
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
             if not recommend_df.empty:
                 rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
