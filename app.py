@@ -129,21 +129,23 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
     finally:
         conn.close()
 
+
 def compute_recommendations(student_arg):
+    # 1) Resolve to internal student_id (pwede student_number or student_id sa URL)
     student_id = resolve_student_id(student_arg)
 
-    # If cannot resolve → global popular/approved
-    if not student_id:
+    # Kung hindi ma-resolve → global popular lang (Approved)
+    if student_id is None:
         fb = fallback_recos(limit=4)
         return fb.to_dict(orient="records")
 
     conn = get_conn()
     try:
-        # 1) Get the student's program/college FIRST so they're always defined
+        # 2) Kunin program_id at colleges_id ng student
         prog_col_df = pd.read_sql(
             "SELECT program_id, colleges_id FROM student_information WHERE student_id = %s LIMIT 1",
             conn,
-            params=[student_id]
+            params=[student_id],
         )
 
         def safe_to_int(v):
@@ -167,102 +169,46 @@ def compute_recommendations(student_arg):
             program_id = None
             college_id = None
 
-        # 2) Load reads and clean them
-        reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
-
-        if not reads_df.empty:
-            reads_df["student_id"] = pd.to_numeric(reads_df["student_id"], errors="coerce")
-            reads_df["tc_id"] = pd.to_numeric(reads_df["tc_id"], errors="coerce")
-            reads_df = reads_df.dropna(subset=["student_id", "tc_id"])
-
-            if reads_df.empty:
-                # no valid reads after cleaning
-                fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
-                return fb.to_dict(orient="records")
-
-            reads_df["student_id"] = reads_df["student_id"].astype(int)
-            reads_df["tc_id"] = reads_df["tc_id"].astype(int)
-
-        # 3) If still empty (no reads at all) → fallback
-        if reads_df.empty:
-            fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
-            return fb.to_dict(orient="records")
-
-        # 4) Build user-item matrix
-        user_item = pd.crosstab(reads_df["student_id"], reads_df["tc_id"])
-        user_item.index = user_item.index.astype(int)
-        user_item.columns = user_item.columns.astype(int)
-
-        if int(student_id) not in user_item.index:
-            fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
-            return fb.to_dict(orient="records")
-
-        # 5) Collaborative filtering
-        sim = cosine_similarity(user_item.values)
-        sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
-
-        similar_students = (
-            sim_df[student_id]
-            .sort_values(ascending=False)
-            .iloc[1:6]
-            .index
-            .tolist()
+        # 3) Kunin lahat ng nabasa na ng student → para ma-exclude sa recommendations
+        reads_df = pd.read_sql(
+            "SELECT tc_id FROM student_reads WHERE student_id = %s",
+            conn,
+            params=[student_id],
         )
 
-        current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
-        recommend_df = pd.DataFrame()
-        candidate_ids = []
-
-        if similar_students:
-            similar_reads = reads_df[reads_df["student_id"].isin(similar_students)]
-            candidate_counts = (
-                similar_reads.groupby("tc_id")["student_id"]
-                .nunique()
-                .sort_values(ascending=False)
-            )
-            candidate_ids = [
-                int(tc) for tc in candidate_counts.index
-                if tc not in current_items
-            ]
-
-        if candidate_ids:
-            placeholders = ",".join(["%s"] * len(candidate_ids))
-            recommend_query = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo,
-                       tc.colleges_id, tc.program_id, tc.academic_year, tc.project_type
-                FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                WHERE tc.tc_id IN ({placeholders})
-            """
-            recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
-
-            if not recommend_df.empty:
-                recommend_df["tc_id"] = recommend_df["tc_id"].astype(int)
-                rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
-                recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
-                recommend_df = (
-                    recommend_df.sort_values(["cf_rank", "tc_id"])
-                    .drop(columns=["cf_rank"])
-                    .head(4)
-                )
-
-        # 6) If CF results are fewer than 4 → fill with fallback
-        if len(recommend_df) < 4:
-            remaining = 4 - len(recommend_df)
-            exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
-            fb = fallback_recos(
-                program_id=program_id,
-                college_id=college_id,
-                exclude_ids=exclude_ids,
-                limit=remaining,
-            )
-            if not fb.empty:
-                recommend_df = pd.concat([recommend_df, fb], ignore_index=True)
-
-        return recommend_df.to_dict(orient="records")
+        exclude_ids = []
+        if not reads_df.empty:
+            reads_df["tc_id"] = pd.to_numeric(reads_df["tc_id"], errors="coerce")
+            reads_df = reads_df.dropna(subset=["tc_id"])
+            exclude_ids = reads_df["tc_id"].astype(int).tolist()
 
     finally:
         conn.close()
+
+    # 4) Main recommendations: most read sa same program & college (Approved only),
+    #    excluding already-read tc_ids
+    rec_df = fallback_recos(
+        program_id=program_id,
+        college_id=college_id,
+        exclude_ids=exclude_ids,
+        limit=4,
+    )
+
+    # 5) Kung kulang pa rin sa 4 → fill with global popular (Approved only)
+    if rec_df.empty or len(rec_df) < 4:
+        remaining = 4 - len(rec_df)
+        extra_exclude = rec_df["tc_id"].tolist() if not rec_df.empty else []
+        # ayaw mong ma-recommend ulit yung kakakuha lang sa rec_df
+        extra_exclude = list(set(extra_exclude + exclude_ids))
+        fb = fallback_recos(
+            exclude_ids=extra_exclude,
+            limit=remaining,
+        )
+        if not fb.empty:
+            rec_df = pd.concat([rec_df, fb], ignore_index=True)
+
+    return rec_df.to_dict(orient="records")
+
 
 @app.route("/recommend")
 def recommend():
@@ -278,6 +224,7 @@ def recommend():
 
     recs = compute_recommendations(student_arg)
     return jsonify(recs)
+
 
 
 # ============================================================
@@ -329,4 +276,5 @@ if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
 
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
