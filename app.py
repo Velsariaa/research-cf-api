@@ -13,7 +13,7 @@ app = Flask(__name__)
 # MySQL connection config (EDIT THIS)
 # ----------------------------
 db_config = {
-    'host': '127.0.0.1:3306',          # change to your DB host if needed
+    'host': 'srv2051.hstgr.io',          # change to your DB host if needed
     'user': 'u311577524_admin',               # change to your DB user
     'password': 'Ej@0MZ#*9',               # change to your DB password
     'database': 'u311577524_research_db',
@@ -366,6 +366,7 @@ if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
 
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
 
 
