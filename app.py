@@ -33,7 +33,6 @@ model = joblib.load('model.pkl')
 # ============================================================
 #  CF PART (from recommend_cf.py) → /recommend endpoint
 # ============================================================
-
 def resolve_student_id(arg):
     raw = (arg or "").strip()
     if raw.isdigit():
@@ -247,11 +246,19 @@ def compute_recommendations(student_arg):
 
 @app.route("/recommend")
 def recommend():
-    student_arg = request.args.get("student_id", "").strip()
+    # primary: student_number, fallback: student_id or generic 'student'
+    student_arg = (
+        request.args.get("student_number", "").strip()
+        or request.args.get("student", "").strip()
+        or request.args.get("student_id", "").strip()
+    )
+
     if not student_arg:
         return jsonify([])
+
     recs = compute_recommendations(student_arg)
     return jsonify(recs)
+
 
 # ============================================================
 #  SEARCH PART → /search endpoint
@@ -300,4 +307,5 @@ def search():
 # ============================================================
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
+
     app.run(host="0.0.0.0", port=8000, debug=True)
